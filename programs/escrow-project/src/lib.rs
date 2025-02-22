@@ -4,11 +4,11 @@ use solana_program::program::invoke;
 use anchor_lang::solana_program::sysvar::clock::Clock;
 use anchor_lang::solana_program::keccak;
 use std::ops::{Add, Mul};
-// use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar};
 use bls12_381_plus::{pairing, G1Affine, G2Affine, G1Projective, Scalar};
 use sha2::{Digest, Sha256};
-// use bls12_381_plus::hash_to_curve::HashToCurve;
 use bls12_381_plus::ExpandMsgXmd;
+// use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
+// use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
 
 declare_id!("CFvp4pXkyqaEDqgZ6sXy4TP8aVjvxr1ztAZWyG8h1CW");
 
@@ -44,7 +44,7 @@ mod escrow_project {
     /**
       Added a new parameter `amount`
     **/
-    pub fn add_funds_to_subscription(ctx: Context<ExtendSubscription>, amount: u64) -> Result<()> {
+    pub fn add_funds_to_subscription(ctx: Context<AddFundsToSubscription>, amount: u64) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let buyer = &ctx.accounts.buyer;
         let system_program = &ctx.accounts.system_program;
@@ -62,14 +62,6 @@ mod escrow_project {
             // &[escrow_signer_seeds],
         )?;
         escrow.balance += amount;
-        
-        // // Generate query tuples
-        // let clock = Clock::get()?.unix_timestamp as u64;
-        // escrow.queries.clear();
-        // let num_blocks = escrow.number_of_blocks;
-        // for i in 0..escrow.query_size.min(10) {
-        //     escrow.queries.push(((clock + i) % num_blocks, (clock + i * 7) % 100));
-        // }  
         Ok(())
     }
 
@@ -205,10 +197,17 @@ mod escrow_project {
     
 }
 
+// fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
+//     let mut bytes = [0u8; 32];  // Create a 32-byte array, initially all zeros
+//     // Convert the u128 into bytes (16 bytes) and place it in the last 16 bytes of the array
+//     bytes[16..32].copy_from_slice(&i.to_be_bytes());  // Using big-endian format
 
-// pub fn perform_hash_to_curve(i: u128) -> G1Affine {
+//     bytes
+// }
+
+// fn perform_hash_to_curve(i: u128) -> G1Affine {
 //     let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_";
-//     let msg = i.to_be_bytes();
+//     let msg = convert_u128_to_32_bytes(i);
 //     let g = <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(&msg, dst);
 //     G1Affine::from(&g)
 // }
@@ -260,6 +259,15 @@ pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [
 }
 
 #[derive(Accounts)]
+pub struct AddFundsToSubscription<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct StartSubscription<'info> {
     #[account(init, seeds = [b"escrow", buyer.key().as_ref()], bump, payer = buyer, space = 4096)]
     pub escrow: Account<'info, Escrow>,
@@ -268,15 +276,6 @@ pub struct StartSubscription<'info> {
     /// CHECK: This is safe.
     #[account(mut)]
     pub seller: AccountInfo<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct ExtendSubscription<'info> {
-    #[account(mut)]
-    pub escrow: Account<'info, Escrow>,
-    #[account(mut)]
-    pub buyer: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
