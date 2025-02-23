@@ -10,7 +10,7 @@ use bls12_381_plus::ExpandMsgXmd;
 // use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
 // use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
 
-declare_id!("CFvp4pXkyqaEDqgZ6sXy4TP8aVjvxr1ztAZWyG8h1CW");
+declare_id!("8UVF6guKqwz7JsPzRaKRcn2Q7CZPFtZY7gXYCMhJ3uTQ");
 
 #[program]
 mod escrow_project {
@@ -18,6 +18,7 @@ mod escrow_project {
     
     pub fn start_subscription(
         ctx: Context<StartSubscription>,
+        subscription_id: u64,
         query_size: u64,
         number_of_blocks: u64,
         u: [u8; 48],
@@ -36,6 +37,7 @@ mod escrow_project {
         escrow.v = v;
         escrow.balance = 0;
         escrow.subscription_duration = 0;
+        escrow.subscription_id = subscription_id;
         escrow.bump = ctx.bumps.escrow;
         Ok(escrow.key())
     }
@@ -148,12 +150,14 @@ mod escrow_project {
     }
 
     pub fn request_fund(ctx: Context<RequestFund>) -> Result<()> {
-        let escrow = &mut ctx.accounts.escrow;
+        let escrow = &ctx.accounts.escrow;
         let user = &ctx.accounts.user;
         let system_program = &ctx.accounts.system_program;
     
         let now = Clock::get()?.unix_timestamp as u64;
-    
+        
+        msg!("Subscription Id from program {}", escrow.subscription_id);
+
         // If the buyer is requesting funds
         if user.key() == escrow.buyer_pubkey {
             require!(
@@ -161,16 +165,28 @@ mod escrow_project {
                 ErrorCode::Unauthorized
             );
     
-            let transfer_amount = escrow.balance * 1_000_000_000;
-            let escrow_signer_seeds: &[&[u8]] = &[b"escrow", &escrow.buyer_pubkey.to_bytes(), &[escrow.bump]];
-    
-            invoke_signed(
-                &system_instruction::transfer(&escrow.key(), &user.key(), transfer_amount),
-                &[escrow.to_account_info(), user.to_account_info(), system_program.to_account_info()],
-                &[escrow_signer_seeds],
-            )?;
-    
-            escrow.balance = 0;
+            let transfer_amount = escrow.balance;
+
+            **ctx.accounts.user.try_borrow_mut_lamports()? = ctx
+                .accounts
+                .user
+                .lamports()
+                .checked_add(transfer_amount)
+                .ok_or(ErrorCode::AmountOverflow)?;
+            
+            **ctx
+                .accounts
+                .escrow
+                .to_account_info()
+                .try_borrow_mut_lamports()? = ctx
+                .accounts
+                .escrow
+                .to_account_info()
+                .lamports()
+                .checked_sub(transfer_amount)
+                .ok_or(ErrorCode::InsufficientFunds)?;
+
+            // escrow.balance = 0;
             return Ok(());
         }
     
@@ -178,16 +194,30 @@ mod escrow_project {
         if user.key() == escrow.seller_pubkey {
             require!(escrow.is_subscription_ended_by_buyer, ErrorCode::Unauthorized);
     
-            let transfer_amount = escrow.balance * 1_000_000_000;
-            let escrow_signer_seeds: &[&[u8]] = &[b"escrow", &escrow.buyer_pubkey.to_bytes(), &[escrow.bump]];
+            // let transfer_amount = escrow.balance * 1_000_000_000;
+            let transfer_amount = escrow.balance;
+
+            **ctx.accounts.user.try_borrow_mut_lamports()? = ctx
+                .accounts
+                .user
+                .lamports()
+                .checked_add(transfer_amount)
+                .ok_or(ErrorCode::AmountOverflow)?;
+            
+            **ctx
+                .accounts
+                .escrow
+                .to_account_info()
+                .try_borrow_mut_lamports()? = ctx
+                .accounts
+                .escrow
+                .to_account_info()
+                .lamports()
+                .checked_sub(transfer_amount)
+                .ok_or(ErrorCode::InsufficientFunds)?;
     
-            invoke_signed(
-                &system_instruction::transfer(&escrow.key(), &user.key(), transfer_amount),
-                &[escrow.to_account_info(), user.to_account_info(), system_program.to_account_info()],
-                &[escrow_signer_seeds],
-            )?;
-    
-            escrow.balance = 0;
+            // escrow.balance = 0;
+
             return Ok(());
         }
     
@@ -268,8 +298,9 @@ pub struct AddFundsToSubscription<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(subscription_id: u64)]
 pub struct StartSubscription<'info> {
-    #[account(init, seeds = [b"escrow", buyer.key().as_ref()], bump, payer = buyer, space = 4096)]
+    #[account(init, seeds = [b"escrow", buyer.key().as_ref(), seller.key().as_ref(), &subscription_id.to_le_bytes()], bump, payer = buyer, space = 4096)]
     pub escrow: Account<'info, Escrow>,
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -297,7 +328,16 @@ pub struct EndSubscriptionBySeller<'info> {
 
 #[derive(Accounts)]
 pub struct RequestFund<'info> {
-    #[account(mut)]
+    #[account(mut, seeds = [
+        b"escrow",
+        // user.key().as_ref(),
+        escrow.buyer_pubkey.as_ref(),
+        escrow.seller_pubkey.as_ref(),
+        &escrow.subscription_id.to_le_bytes(),
+    ],
+    bump,
+    close = user,
+    )]
     pub escrow: Account<'info, Escrow>,
     #[account(mut)]
     pub user: Signer<'info>, // Can be buyer or seller
@@ -343,11 +383,21 @@ pub struct Escrow {
     pub last_prove_date: i64,
     pub is_subscription_ended_by_buyer: bool,
     pub is_subscription_ended_by_seller: bool,
+    pub subscription_id: u64,
     pub bump: u8,
 }
 
 #[error_code]
 pub enum ErrorCode {
+    #[msg("Insufficient funds")]
+    InsufficientFunds,
+
+    #[msg("Amount overflow")]
+    AmountOverflow,
+    
+    #[msg("Payment count overflow")]
+    PaymentCountOverflow,
+
     #[msg("No validation needed at this time")]
     NoValidationNeeded,
 
