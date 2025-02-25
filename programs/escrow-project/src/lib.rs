@@ -161,8 +161,8 @@ mod escrow_project {
         // If the buyer is requesting funds
         if user.key() == escrow.buyer_pubkey {
             require!(
-                // escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * 86400).try_into().unwrap(),
-                escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 180).try_into().unwrap(), // 3 mins for testing
+                escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * 86400).try_into().unwrap(),
+                // escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 180).try_into().unwrap(), // 3 mins for testing
                 ErrorCode::Unauthorized
             );
     
