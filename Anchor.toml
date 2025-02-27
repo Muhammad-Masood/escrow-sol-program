@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-escrow_project = "8UVF6guKqwz7JsPzRaKRcn2Q7CZPFtZY7gXYCMhJ3uTQ"
+escrow_project = "5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei"
 
 [registry]
 url = "https://api.apr.dev"
