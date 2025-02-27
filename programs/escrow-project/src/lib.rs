@@ -4,13 +4,13 @@ use solana_program::program::invoke;
 use anchor_lang::solana_program::sysvar::clock::Clock;
 use anchor_lang::solana_program::keccak;
 use std::ops::{Add, Mul};
-use bls12_381_plus::{pairing, G1Affine, G2Affine, G1Projective, Scalar};
 use sha2::{Digest, Sha256};
-use bls12_381_plus::ExpandMsgXmd;
-// use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
-// use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
+// use bls12_381_plus::{pairing, G1Affine, G2Affine, G1Projective, Scalar};
+// use bls12_381_plus::ExpandMsgXmd;
+use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
+use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
 
-declare_id!("8UVF6guKqwz7JsPzRaKRcn2Q7CZPFtZY7gXYCMhJ3uTQ");
+declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 
 #[program]
 mod escrow_project {
@@ -227,41 +227,26 @@ mod escrow_project {
     
 }
 
-// fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
-//     let mut bytes = [0u8; 32];  // Create a 32-byte array, initially all zeros
-//     // Convert the u128 into bytes (16 bytes) and place it in the last 16 bytes of the array
-//     bytes[16..32].copy_from_slice(&i.to_be_bytes());  // Using big-endian format
+fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
+    let mut bytes = [0u8; 32];  // Create a 32-byte array, initially all zeros
 
-//     bytes
-// }
+    // Convert the u128 into bytes (16 bytes) and place it in the last 16 bytes of the array
+    bytes[16..32].copy_from_slice(&i.to_be_bytes());  // Using big-endian format
 
-// fn perform_hash_to_curve(i: u128) -> G1Affine {
-//     let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_";
-//     let msg = convert_u128_to_32_bytes(i);
-//     let g = <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(&msg, dst);
-//     G1Affine::from(&g)
-// }
+    bytes
+}
 
 fn perform_hash_to_curve(i: u128) -> G1Affine {
     let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_";
-    let msg = i.to_be_bytes();
-    
-    // Perform SHA256 hash
-    let mut hasher = Sha256::new();
-    hasher.update(&msg);
-    let hash_result = hasher.finalize();
-    
-    // Convert hash to a valid field element
-    let mut field_bytes = [0u8; 48]; 
-    field_bytes[..32].copy_from_slice(&hash_result[..32]);
-    let hash = Sha256::digest(field_bytes); // 32-byte hash
-    let scalar = Scalar::from_bytes(&hash.try_into().unwrap()).unwrap();  // Convert hash to scalar
 
-    // Multiply base point by scalar
-    let base_point = G1Affine::generator();
-    let g1_projective = base_point.mul(scalar);
-    
-    G1Affine::from(&g1_projective)
+    // Convert u128 to 32-byte array
+    let msg = convert_u128_to_32_bytes(i);
+
+    // Perform hash-to-curve
+    let g = <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(&msg, dst);
+
+    // Convert from G1Projective to G1Affine
+    G1Affine::from(&g)
 }
 
 fn hex_str_to_scalar(hex_str: &str) -> Scalar {
