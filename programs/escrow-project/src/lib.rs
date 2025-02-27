@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 // use bls12_381_plus::ExpandMsgXmd;
 use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
 use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
+use solana_program::sysvar::slot_hashes;
 
 declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 
@@ -69,26 +70,40 @@ mod escrow_project {
 
     pub fn generate_queries(ctx: Context<GenerateQueries>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
-    
+
+        let slot_hashes = &ctx.accounts.slot_hashes;
+
         // Get the current timestamp
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
-    
-        // Generate queries
-        let queries: Vec<(u128, [u8; 32])> = (0..escrow.query_size)
-            .map(|i| {
-                let block_index = (current_time + i as i64) % escrow.number_of_blocks as i64;
-                let v_i = keccak::hash(&block_index.to_le_bytes()).0; // Generate 32-byte hash
-                (block_index as u128, v_i)
-            })
-            .collect();
-    
+
+        require!(
+            *slot_hashes.to_account_info().key == slot_hashes::id(),
+            ErrorCode::InvalidSlotHashSysvar
+        );
+        let binding = slot_hashes.to_account_info();
+        let data = binding.try_borrow_data()?;
+        let num_slot_hashes = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let mut pos = 8;
+
+        let mut queries = Vec::new();
+
+        for i in 0..escrow.query_size.min(num_slot_hashes) {
+            let slot = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) % escrow.number_of_blocks as u64;
+            pos += 8;
+            let hash = &data[pos..pos + 32]; // Slot hash (32 bytes)
+            pos += 32;
+
+            // Use slot as block index and hash as v_i
+            queries.push((slot as u128, hash.try_into().unwrap()));
+        }
+
         escrow.queries = queries;
         escrow.queries_generation_time = current_time;
-    
+
         Ok(())
     }
-    
+
     pub fn get_query_values(ctx: Context<GetQueryValues>) -> Result<Vec<(u128, [u8; 32])>> {
         let escrow = &ctx.accounts.escrow;
         Ok(escrow.queries.clone())
@@ -347,6 +362,8 @@ pub struct ProveSubscription<'info> {
 pub struct GenerateQueries<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
+    #[account(address = slot_hashes::id())]
+    pub slot_hashes: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -391,4 +408,7 @@ pub enum ErrorCode {
 
     #[msg("Unauthorized operation.")]
     Unauthorized,
+
+    #[msg("Invalid SlotHashes sysvar provided.")]
+    InvalidSlotHashSysvar,
 }
