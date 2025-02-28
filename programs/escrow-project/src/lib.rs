@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use bls12_381_plus::ExpandMsgXmd;
 // use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
 // use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
+use solana_program::sysvar::slot_hashes;
 
-declare_id!("8UVF6guKqwz7JsPzRaKRcn2Q7CZPFtZY7gXYCMhJ3uTQ");
+declare_id!("GXSHqMQ9t85xXt2F7HBFC4h2r5qdg7NezrXb6GxwQk9p");
 
 #[program]
 mod escrow_project {
@@ -69,20 +70,43 @@ mod escrow_project {
 
     pub fn generate_queries(ctx: Context<GenerateQueries>) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
-    
+
+        let slot_hashes = &ctx.accounts.slot_hashes;
+
         // Get the current timestamp
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
-    
+
+        require!(
+            *slot_hashes.to_account_info().key == slot_hashes::id(),
+            ErrorCode::InvalidSlotHashSysvar
+        );
+        let binding = slot_hashes.to_account_info();
+        let data = binding.try_borrow_data()?;
+        let num_slot_hashes = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        let mut pos = 8;
+
         // Generate queries
-        let queries: Vec<(u128, [u8; 32])> = (0..escrow.query_size)
-            .map(|i| {
-                let block_index = (current_time + i as i64) % escrow.number_of_blocks as i64;
-                let v_i = keccak::hash(&block_index.to_le_bytes()).0; // Generate 32-byte hash
-                (block_index as u128, v_i)
-            })
-            .collect();
+        // let queries: Vec<(u128, [u8; 32])> = (0..escrow.query_size)
+        //     .map(|i| {
+        //         let block_index = (current_time + i as i64) % escrow.number_of_blocks as i64;
+        //         let v_i = keccak::hash(&block_index.to_le_bytes()).0; // Generate 32-byte hash
+        //         (block_index as u128, v_i)
+        //     })
+        //     .collect();
+
+        let mut queries = Vec::new();
+
+        for i in 0..escrow.query_size.min(num_slot_hashes) {
+            let slot = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            let hash = &data[pos..pos + 32]; // Slot hash (32 bytes)
+            pos += 32;
     
+            // Use slot as block index and hash as v_i
+            queries.push((slot as u128, hash.try_into().unwrap()));
+        }
+
         escrow.queries = queries;
         escrow.queries_generation_time = current_time;
     
@@ -94,7 +118,7 @@ mod escrow_project {
         Ok(escrow.queries.clone())
     }
 
-    pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: u128) -> Result<()> {
+    pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: [u8; 32]) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let seller = &ctx.accounts.seller;
         // let system_program = &ctx.accounts.system_program;
@@ -109,15 +133,40 @@ mod escrow_project {
             return Err(ErrorCode::GenerateAnotherQuery.into());
         }
 
-        let multiplication_sum = calculate_multiplication(&escrow.queries, escrow.u, mu);
-        let g_affine = G2Affine::from_compressed(&escrow.g).unwrap();
+        // let multiplication_sum = calculate_multiplication(&escrow.queries, escrow.u, mu);
+        // let g_affine = G2Affine::from_compressed(&escrow.g).unwrap();
+        // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
+        // let v_affine = G2Affine::from_compressed(&escrow.v).unwrap();
+        // let multiplication_sum_affine = G1Affine::from(multiplication_sum);
+        
+        // let left_pairing = pairing(&sigma_affine, &g_affine);
+        // let right_pairing = pairing(&multiplication_sum_affine, &v_affine);
+    
+        // if left_pairing == right_pairing {
+        //     escrow.subscription_duration += 1;
+        //     if escrow.subscription_duration > 5 {
+        //         let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
+        //         **seller.to_account_info().try_borrow_mut_lamports()? += transfer_amount;
+        //         **escrow.to_account_info().try_borrow_mut_lamports()? -= transfer_amount;
+        //         escrow.balance -= transfer_amount;
+        //     }
+
+        let g_norm = G2Affine::from_compressed(&escrow.g).unwrap();
+        let v_norm = G2Affine::from_compressed(&escrow.v).unwrap();
+        let u = G1Affine::from_compressed(&escrow.u).unwrap();
+
+        let mu_scalar = Scalar::from_bytes(&mu).unwrap();
         let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
-        let v_affine = G2Affine::from_compressed(&escrow.v).unwrap();
+
+        let all_h_i_multiply_vi = compute_h_i_multiply_vi(&escrow.queries);
+        let u_multiply_mu = u.mul(mu_scalar);
+        
+        let multiplication_sum = all_h_i_multiply_vi.add(&u_multiply_mu);
         let multiplication_sum_affine = G1Affine::from(multiplication_sum);
         
-        let left_pairing = pairing(&sigma_affine, &g_affine);
-        let right_pairing = pairing(&multiplication_sum_affine, &v_affine);
-    
+        let left_pairing = pairing(&sigma_affine, &g_norm);
+        let right_pairing = pairing(&multiplication_sum_affine, &v_norm);
+        
         if left_pairing == right_pairing {
             escrow.subscription_duration += 1;
             if escrow.subscription_duration > 5 {
@@ -271,23 +320,44 @@ fn hex_str_to_scalar(hex_str: &str) -> Scalar {
     Scalar::from_bytes(&bytes_array).unwrap()
 }
 
-pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [u8; 48], mu: u128) -> G1Affine {
-    let mut multiplication_sum = G1Projective::identity();
+// pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [u8; 48], mu: u128) -> G1Affine {
+//     let mut multiplication_sum = G1Projective::identity();
 
-    for &(block_index, ref v_i_bytes) in queries {
-        let h_i = perform_hash_to_curve(block_index);
-        let v_i_scalar = Scalar::from_bytes(v_i_bytes).unwrap();
-        multiplication_sum = multiplication_sum.add(h_i.mul(v_i_scalar));
+//     for &(block_index, ref v_i_bytes) in queries {
+//         let h_i = perform_hash_to_curve(block_index);
+//         let v_i_scalar = Scalar::from_bytes(v_i_bytes).unwrap();
+//         multiplication_sum = multiplication_sum.add(h_i.mul(v_i_scalar));
+//     }
+
+//     let u = G1Affine::from_compressed(&u_compressed).unwrap();
+//     // let u_mul_mu = u.mul(Scalar::from(mu as u64));
+//     let mu_bytes = mu.to_le_bytes();
+//     let mu_scalar = Scalar::from_bytes(&mu_bytes[..32].try_into().unwrap()).unwrap();
+//     let u_mul_mu = u.mul(mu_scalar);
+
+//     G1Affine::from(multiplication_sum.add(u_mul_mu)) 
+// }
+
+fn reverse_endianness(input: [u8; 32]) -> [u8; 32] {
+    let mut reversed = input;
+    reversed.reverse();
+    reversed
+}
+
+pub fn compute_h_i_multiply_vi(queries: &Vec<(u128, [u8; 32])>) -> G1Projective {
+    let mut all_h_i_multiply_vi = G1Projective::identity();
+
+    for (i, v_i_bytes) in queries {
+        let h_i = perform_hash_to_curve(*i); // Compute H(i)
+        let v_i_scalar = Scalar::from_bytes(&reverse_endianness(*v_i_bytes)).unwrap(); // Convert v_i to Scalar
+        let h_i_multiply_v_i = h_i.mul(v_i_scalar); // Compute H(i)^(v_i)
+
+        all_h_i_multiply_vi = all_h_i_multiply_vi.add(&h_i_multiply_v_i);
     }
 
-    let u = G1Affine::from_compressed(&u_compressed).unwrap();
-    // let u_mul_mu = u.mul(Scalar::from(mu as u64));
-    let mu_bytes = mu.to_le_bytes();
-    let mu_scalar = Scalar::from_bytes(&mu_bytes[..32].try_into().unwrap()).unwrap();
-    let u_mul_mu = u.mul(mu_scalar);
-
-    G1Affine::from(multiplication_sum.add(u_mul_mu)) 
+    all_h_i_multiply_vi
 }
+
 
 #[derive(Accounts)]
 pub struct AddFundsToSubscription<'info> {
@@ -363,6 +433,9 @@ pub struct ProveSubscription<'info> {
 pub struct GenerateQueries<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
+    /// CHECK: This is the SlotHashes sysvar, used for retrieving recent slot hashes.
+    #[account(address = slot_hashes::id())]
+    pub slot_hashes: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -407,4 +480,7 @@ pub enum ErrorCode {
 
     #[msg("Unauthorized operation.")]
     Unauthorized,
+
+    #[msg("Invalid SlotHashes sysvar provided.")]
+    InvalidSlotHashSysvar,
 }
