@@ -362,6 +362,7 @@ pub struct ProveSubscription<'info> {
 pub struct GenerateQueries<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
+    /// CHECK: This is a sysvar account required for verifying slot hashes
     #[account(address = slot_hashes::id())]
     pub slot_hashes: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
