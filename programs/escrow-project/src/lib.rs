@@ -5,8 +5,6 @@ use anchor_lang::solana_program::sysvar::clock::Clock;
 use anchor_lang::solana_program::keccak;
 use std::ops::{Add, Mul};
 use sha2::{Digest, Sha256};
-// use bls12_381_plus::{pairing, G1Affine, G2Affine, G1Projective, Scalar};
-// use bls12_381_plus::ExpandMsgXmd;
 use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
 use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
 use solana_program::sysvar::slot_hashes;
@@ -17,7 +15,22 @@ declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 #[program]
 mod escrow_project {
     use super::*;
-    
+
+    /// Starts a new subscription by initializing an escrow account with the provided parameters.
+    /// The escrow account stores subscription details and tracks the buyer, seller, and other related data.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the buyer, seller, and escrow accounts.
+    /// - `subscription_id`: The unique ID for the subscription being started.
+    /// - `query_size`: The size of the query for the subscription.
+    /// - `number_of_blocks`: The number of blocks involved in the subscription.
+    /// - `u`: A parameter for the subscription (a 48-byte array).
+    /// - `g`: A parameter for the subscription (a 96-byte array).
+    /// - `v`: A parameter for the subscription (a 96-byte array).
+    /// - `validate_every`: The validation interval for the subscription.
+    ///
+    /// # Returns
+    /// - `Result<Pubkey>`: Returns the public key of the initialized escrow account.
     pub fn start_subscription(
         ctx: Context<StartSubscription>,
         subscription_id: u64,
@@ -26,36 +39,53 @@ mod escrow_project {
         u: [u8; 48],
         g: [u8; 96],
         v: [u8; 96],
-        validate_every: i64, // Timestamp interval
+        validate_every: i64,
     ) -> Result<Pubkey> {
+        msg!("Starting subscription with ID: {}", subscription_id);
+
         let escrow = &mut ctx.accounts.escrow;
+
         escrow.buyer_pubkey = *ctx.accounts.buyer.key;
         escrow.seller_pubkey = *ctx.accounts.seller.key;
+
+        msg!("Assigned buyer pubkey: {}, seller pubkey: {}", escrow.buyer_pubkey, escrow.seller_pubkey);
+
         escrow.query_size = query_size;
         escrow.number_of_blocks = number_of_blocks;
         escrow.validate_every = validate_every;
         escrow.u = u;
         escrow.g = g;
         escrow.v = v;
+
+        msg!("Query size: {}, Number of blocks: {}, Validate every: {}", query_size, number_of_blocks, validate_every);
+
         escrow.balance = 0;
         escrow.subscription_duration = 0;
         escrow.subscription_id = subscription_id;
         escrow.bump = ctx.bumps.escrow;
+
+        msg!("Initialized escrow with subscription ID: {}, bump: {}", escrow.subscription_id, escrow.bump);
+
         Ok(escrow.key())
     }
 
-    // This was `extend_subscription` previously
-    /**
-      Added a new parameter `amount`
-    **/
+    /// Adds funds to an existing subscription by transferring the specified amount from the buyer's account to the escrow account.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the buyer, escrow, and system program accounts.
+    /// - `amount`: The amount to be transferred and added to the escrow's balance.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the transfer and balance update are successful, or an error if any operation fails.
     pub fn add_funds_to_subscription(ctx: Context<AddFundsToSubscription>, amount: u64) -> Result<()> {
+        msg!("Adding funds to subscription: {} units", amount);
+
         let escrow = &mut ctx.accounts.escrow;
         let buyer = &ctx.accounts.buyer;
         let system_program = &ctx.accounts.system_program;
-        
-        // // Transfer Amount to escrow
-        // let escrow_signer_seeds: &[&[u8]] = &[b"escrow", &escrow.buyer.to_bytes(), &[escrow.bump]]; 
-        // invoke_signed(
+
+        msg!("Transferring {} units from buyer: {} to escrow: {}", amount, buyer.key(), escrow.key());
+
         invoke(
             &system_instruction::transfer(
                 &buyer.key(),
@@ -63,29 +93,47 @@ mod escrow_project {
                 amount
             ),
             &[buyer.to_account_info(), escrow.to_account_info(), system_program.to_account_info()],
-            // &[escrow_signer_seeds],
         )?;
+
         escrow.balance += amount;
+        msg!("New balance of escrow after adding funds: {}", escrow.balance);
+
         Ok(())
     }
 
+    /// Generates queries for a subscription by processing slot hashes from the system's slot hash data.
+    /// Each query consists of a slot (modulo the number of blocks) and a value derived from a slot hash.
+    /// The generated queries are saved in the escrow account, along with the timestamp of query generation.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account and slot hashes system account.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the queries are successfully generated and saved.
     pub fn generate_queries(ctx: Context<GenerateQueries>) -> Result<()> {
-        let escrow = &mut ctx.accounts.escrow;
+        msg!("Generating queries for subscription...");
 
+        let escrow = &mut ctx.accounts.escrow;
         let slot_hashes = &ctx.accounts.slot_hashes;
 
         // Get the current timestamp
         let clock = Clock::get()?;
         let current_time = clock.unix_timestamp;
+        msg!("Current timestamp: {}", current_time);
 
         require!(
-            *slot_hashes.to_account_info().key == slot_hashes::id(),
-            ErrorCode::InvalidSlotHashSysvar
-        );
+        *slot_hashes.to_account_info().key == slot_hashes::id(),
+        ErrorCode::InvalidSlotHashSysvar
+    );
+
+        msg!("Slot hashes account ID validated: {}", slot_hashes.to_account_info().key);
+
         let binding = slot_hashes.to_account_info();
         let data = binding.try_borrow_data()?;
         let num_slot_hashes = u64::from_le_bytes(data[0..8].try_into().unwrap());
         let mut pos = 8;
+
+        msg!("Number of slot hashes: {}", num_slot_hashes);
 
         let mut queries = Vec::new();
 
@@ -99,26 +147,31 @@ mod escrow_project {
 
             // Use slot as block index and hash as v_i
             queries.push((slot as u128, v_i));
+
+            msg!("Generated query: Slot: {}, v_i: {:?}", slot, v_i);
         }
 
         escrow.queries = queries;
         escrow.queries_generation_time = current_time;
 
+        msg!("Queries generation completed at: {}", current_time);
+
         Ok(())
     }
 
+    // todo: try remove
     pub fn get_query_values(ctx: Context<GetQueryValues>) -> Result<Vec<(u128, [u8; 32])>> {
         let escrow = &ctx.accounts.escrow;
         Ok(escrow.queries.clone())
     }
 
-    pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: u128) -> Result<()> {
+    pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: [u8; 32]) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let seller = &ctx.accounts.seller;
         // let system_program = &ctx.accounts.system_program;
         let clock = Clock::get()?;
         let now = clock.unix_timestamp;
-        
+
         if now < escrow.last_prove_date + escrow.validate_every {
             return Err(ErrorCode::NoValidationNeeded.into());
         }
@@ -127,16 +180,49 @@ mod escrow_project {
             return Err(ErrorCode::GenerateAnotherQuery.into());
         }
 
-        let multiplication_sum = calculate_multiplication(&escrow.queries, escrow.u, mu);
-        let g_affine = G2Affine::from_compressed(&escrow.g).unwrap();
-        let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
-        let v_affine = G2Affine::from_compressed(&escrow.v).unwrap();
-        let multiplication_sum_affine = G1Affine::from(multiplication_sum);
-        
-        let left_pairing = pairing(&sigma_affine, &g_affine);
-        let right_pairing = pairing(&multiplication_sum_affine, &v_affine);
-    
-        if left_pairing == right_pairing {
+        // let multiplication_sum = calculate_multiplication(&escrow.queries, escrow.u, mu);
+        // let g_affine = G2Affine::from_compressed(&escrow.g).unwrap();
+        // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
+        // let v_affine = G2Affine::from_compressed(&escrow.v).unwrap();
+        // let multiplication_sum_affine = G1Affine::from(multiplication_sum);
+        //
+        // let left_pairing = pairing(&sigma_affine, &g_affine);
+        // let right_pairing = pairing(&multiplication_sum_affine, &v_affine);
+        //
+        // if left_pairing == right_pairing {
+        //     escrow.subscription_duration += 1;
+        //     if escrow.subscription_duration > 5 {
+        //         let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
+        //         **seller.to_account_info().try_borrow_mut_lamports()? += transfer_amount;
+        //         **escrow.to_account_info().try_borrow_mut_lamports()? -= transfer_amount;
+        //         escrow.balance -= transfer_amount;
+        //     }
+        //     escrow.last_prove_date = now;
+        //     Ok(())
+        // } else {
+        //     Err(ErrorCode::Unauthorized.into())
+        // }
+
+        // let g_norm = G2Affine::from_compressed(&escrow.g).unwrap();
+        // let v_norm = G2Affine::from_compressed(&escrow.v).unwrap();
+        // let u = G1Affine::from_compressed(&escrow.u).unwrap();
+        //
+        // let mu_scalar = Scalar::from_bytes(&mu).unwrap();   //todo replace mu to be and than use reverse endianness
+        // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
+
+        // let all_h_i_multiply_vi = compute_h_i_multiply_vi(&escrow.queries);
+        // let u_multiply_mu = u.mul(mu_scalar);
+        //
+        // let multiplication_sum = all_h_i_multiply_vi.add(&u_multiply_mu);
+        // let multiplication_sum_affine = G1Affine::from(multiplication_sum);
+        //
+        // let left_pairing = pairing(&sigma_affine, &g_norm);
+        // let right_pairing = pairing(&multiplication_sum_affine, &v_norm);
+        //
+        // let is_verified = left_pairing.eq(&right_pairing);
+        let is_verified = false;
+
+        if is_verified {
             escrow.subscription_duration += 1;
             if escrow.subscription_duration > 5 {
                 let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
@@ -151,39 +237,93 @@ mod escrow_project {
         }
     }
 
+    /// Ends a subscription by the buyer. This function ensures that only the buyer can end the subscription.
+    /// The function checks that the buyer attempting to end the subscription matches the one who started it.
+    /// If valid, it marks the subscription as ended by the buyer.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account and the buyer's account.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the subscription is successfully ended by the buyer.
     pub fn end_subscription_by_buyer(ctx: Context<EndSubscriptionByBuyer>) -> Result<()> {
+        msg!("Ending subscription by buyer...");
+
         let escrow = &mut ctx.accounts.escrow;
         let buyer = &ctx.accounts.buyer;
+
+        // Ensure that only the buyer can end the subscription
         require!(escrow.buyer_pubkey == buyer.key(), ErrorCode::Unauthorized);
+
+        msg!("Subscription ending authorized for buyer: {}", buyer.key());
+
+        // Mark the subscription as ended by the buyer
         escrow.is_subscription_ended_by_buyer = true;
+
+        msg!("Subscription successfully ended by buyer: {}", buyer.key());
+
         Ok(())
     }
 
+    /// Ends a subscription by the seller. This function ensures that only the seller can end the subscription.
+    /// The function checks that the seller attempting to end the subscription matches the one who started it.
+    /// If valid, it marks the subscription as ended by the seller.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account and the seller's account.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the subscription is successfully ended by the seller.
     pub fn end_subscription_by_seller(ctx: Context<EndSubscriptionBySeller>) -> Result<()> {
+        msg!("Ending subscription by seller...");
+
         let escrow = &mut ctx.accounts.escrow;
         let seller = &ctx.accounts.seller;
+
+        // Ensure that only the seller can end the subscription
         require!(escrow.seller_pubkey == seller.key(), ErrorCode::Unauthorized);
+
+        msg!("Subscription ending authorized for seller: {}", seller.key());
+
+        // Mark the subscription as ended by the seller
         escrow.is_subscription_ended_by_seller = true;
+
+        msg!("Subscription successfully ended by seller: {}", seller.key());
+
         Ok(())
     }
 
+    /// Handles the fund request process for both the buyer and the seller.
+    /// This function checks whether the user requesting the funds is the buyer or the seller
+    /// and ensures the correct conditions are met for each case. If the conditions are satisfied,
+    /// the requested funds are transferred from the escrow account to the user.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account, user account, and system program.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the funds are successfully transferred. Returns an error if the conditions are not met.
     pub fn request_fund(ctx: Context<RequestFund>) -> Result<()> {
         let escrow = &ctx.accounts.escrow;
         let user = &ctx.accounts.user;
         let system_program = &ctx.accounts.system_program;
-    
+
         let now = Clock::get()?.unix_timestamp as u64;
-        
+
         msg!("Subscription Id from program {}", escrow.subscription_id);
 
         // If the buyer is requesting funds
         if user.key() == escrow.buyer_pubkey {
+            msg!("Buyer is requesting funds");
+
             require!(
-                escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * 86400).try_into().unwrap(),
-                ErrorCode::Unauthorized
-            );
-    
+            escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * 86400).try_into().unwrap(),
+            ErrorCode::Unauthorized
+        );
+
             let transfer_amount = escrow.balance;
+
+            msg!("Transferring {} lamports from escrow to buyer", transfer_amount);
 
             **ctx.accounts.user.try_borrow_mut_lamports()? = ctx
                 .accounts
@@ -191,7 +331,7 @@ mod escrow_project {
                 .lamports()
                 .checked_add(transfer_amount)
                 .ok_or(ErrorCode::AmountOverflow)?;
-            
+
             **ctx
                 .accounts
                 .escrow
@@ -204,16 +344,20 @@ mod escrow_project {
                 .checked_sub(transfer_amount)
                 .ok_or(ErrorCode::InsufficientFunds)?;
 
-            // escrow.balance = 0;
+            msg!("Funds successfully transferred to buyer");
+
             return Ok(());
         }
-    
+
         // If the seller is requesting funds
         if user.key() == escrow.seller_pubkey {
+            msg!("Seller is requesting funds");
+
             require!(escrow.is_subscription_ended_by_buyer, ErrorCode::Unauthorized);
-    
-            // let transfer_amount = escrow.balance * 1_000_000_000;
+
             let transfer_amount = escrow.balance;
+
+            msg!("Transferring {} lamports from escrow to seller", transfer_amount);
 
             **ctx.accounts.user.try_borrow_mut_lamports()? = ctx
                 .accounts
@@ -221,7 +365,7 @@ mod escrow_project {
                 .lamports()
                 .checked_add(transfer_amount)
                 .ok_or(ErrorCode::AmountOverflow)?;
-            
+
             **ctx
                 .accounts
                 .escrow
@@ -233,16 +377,16 @@ mod escrow_project {
                 .lamports()
                 .checked_sub(transfer_amount)
                 .ok_or(ErrorCode::InsufficientFunds)?;
-    
-            // escrow.balance = 0;
+
+            msg!("Funds successfully transferred to seller");
 
             return Ok(());
         }
-    
+
         // If none of the conditions are met
+        msg!("Unauthorized fund request attempt");
         Err(ErrorCode::Unauthorized.into())
     }
-    
 }
 
 fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
@@ -273,10 +417,6 @@ fn num_modulus_p(num: [u8; 32]) -> [u8; 32] {
     // Perform modulo operation (num_a % p)
     let result = &num % &p;
 
-    println!("num (big-endian)  : {}", hex::encode(num.to_bytes_be()));
-    println!("p (big-endian) : {}", hex::encode(p.to_bytes_be()));
-    println!("result            : {}", hex::encode(result.to_bytes_be()));
-
     // Convert the result back to bytes (little-endian format)
     let mut result_bytes: [u8; 32] = [0; 32]; // Initialize array with zeros
     let result_vec = result.to_bytes_be(); // Get Vec<u8> in little-endian format
@@ -286,6 +426,26 @@ fn num_modulus_p(num: [u8; 32]) -> [u8; 32] {
     result_bytes[..len].copy_from_slice(&result_vec[..len]);
 
     result_bytes
+}
+
+fn reverse_endianness(input: [u8; 32]) -> [u8; 32] {
+    let mut reversed = input;
+    reversed.reverse();
+    reversed
+}
+
+pub fn compute_h_i_multiply_vi(queries: &Vec<(u128, [u8; 32])>) -> G1Projective {
+    let mut all_h_i_multiply_vi = G1Projective::identity();
+
+    for (i, v_i_bytes) in queries {
+        let h_i = perform_hash_to_curve(*i); // Compute H(i)
+        let v_i_scalar = Scalar::from_bytes(&reverse_endianness(*v_i_bytes)).unwrap(); // Convert v_i to Scalar
+        let h_i_multiply_v_i = h_i.mul(v_i_scalar); // Compute H(i)^(v_i)
+
+        all_h_i_multiply_vi = all_h_i_multiply_vi.add(&h_i_multiply_v_i);
+    }
+
+    all_h_i_multiply_vi
 }
 
 fn perform_hash_to_curve(i: u128) -> G1Affine {
