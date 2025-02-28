@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
 use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
 use solana_program::sysvar::slot_hashes;
+use num_bigint::BigUint;
 
 declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 
@@ -94,8 +95,10 @@ mod escrow_project {
             let hash = &data[pos..pos + 32]; // Slot hash (32 bytes)
             pos += 32;
 
+            let v_i: [u8; 32] = num_modulus_p(hash.try_into().unwrap());
+
             // Use slot as block index and hash as v_i
-            queries.push((slot as u128, hash.try_into().unwrap()));
+            queries.push((slot as u128, v_i));
         }
 
         escrow.queries = queries;
@@ -249,6 +252,40 @@ fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
     bytes[16..32].copy_from_slice(&i.to_be_bytes());  // Using big-endian format
 
     bytes
+}
+
+fn num_modulus_p(num: [u8; 32]) -> [u8; 32] {
+    let p_modulus_bytes: [u8; 32] = [
+        0x73, 0xed, 0xa7, 0x53, // 0x73ed_a753
+        0x29, 0x9d, 0x7d, 0x48, // 0x299d_7d48
+        0x33, 0x39, 0xd8, 0x08, // 0x3339_d808
+        0x09, 0xa1, 0xd8, 0x05, // 0x09a1_d805
+        0x53, 0xbd, 0xa4, 0x02, // 0x53bd_a402
+        0xff, 0xfe, 0x5b, 0xfe, // 0xfffe_5bfe
+        0xff, 0xff, 0xff, 0xff, // 0xffff_ffff
+        0x00, 0x00, 0x00, 0x01  // 0x0000_0001
+    ];
+
+    // Convert both [u8; 32] arrays to BigUint (Little-Endian format)
+    let num = BigUint::from_bytes_be(&num);
+    let p = BigUint::from_bytes_be(&p_modulus_bytes);
+
+    // Perform modulo operation (num_a % p)
+    let result = &num % &p;
+
+    println!("num (big-endian)  : {}", hex::encode(num.to_bytes_be()));
+    println!("p (big-endian) : {}", hex::encode(p.to_bytes_be()));
+    println!("result            : {}", hex::encode(result.to_bytes_be()));
+
+    // Convert the result back to bytes (little-endian format)
+    let mut result_bytes: [u8; 32] = [0; 32]; // Initialize array with zeros
+    let result_vec = result.to_bytes_be(); // Get Vec<u8> in little-endian format
+
+    // Copy the Vec<u8> into the fixed-size array, handling cases where it's smaller than 32 bytes
+    let len = result_vec.len().min(32);
+    result_bytes[..len].copy_from_slice(&result_vec[..len]);
+
+    result_bytes
 }
 
 fn perform_hash_to_curve(i: u128) -> G1Affine {
