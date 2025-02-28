@@ -12,6 +12,10 @@ use num_bigint::BigUint;
 
 declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 
+pub const MIN_IN_SECOND: i64 = 60;
+pub const HOUR_IN_SECOND: i64 = 60 * MIN_IN_SECOND;
+pub const DAY_IN_SECOND: i64 = 24 * HOUR_IN_SECOND;
+
 #[program]
 mod escrow_project {
     use super::*;
@@ -122,9 +126,8 @@ mod escrow_project {
         msg!("Current timestamp: {}", current_time);
 
         require!(
-        *slot_hashes.to_account_info().key == slot_hashes::id(),
-        ErrorCode::InvalidSlotHashSysvar
-    );
+            *slot_hashes.to_account_info().key == slot_hashes::id(),
+            ErrorCode::InvalidSlotHashSysvar);
 
         msg!("Slot hashes account ID validated: {}", slot_hashes.to_account_info().key);
 
@@ -159,24 +162,17 @@ mod escrow_project {
         Ok(())
     }
 
-    // todo: try remove
-    pub fn get_query_values(ctx: Context<GetQueryValues>) -> Result<Vec<(u128, [u8; 32])>> {
-        let escrow = &ctx.accounts.escrow;
-        Ok(escrow.queries.clone())
-    }
-
     pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: [u8; 32]) -> Result<()> {
         let escrow = &mut ctx.accounts.escrow;
         let seller = &ctx.accounts.seller;
-        // let system_program = &ctx.accounts.system_program;
+
         let clock = Clock::get()?;
         let now = clock.unix_timestamp;
 
         if now < escrow.last_prove_date + escrow.validate_every {
             return Err(ErrorCode::NoValidationNeeded.into());
         }
-        // 30*60 = 1800
-        if now > escrow.queries_generation_time + 1800 {
+        if now > escrow.queries_generation_time + 30 * MIN_IN_SECOND {
             return Err(ErrorCode::GenerateAnotherQuery.into());
         }
 
@@ -202,14 +198,14 @@ mod escrow_project {
         // } else {
         //     Err(ErrorCode::Unauthorized.into())
         // }
-
+        //
         // let g_norm = G2Affine::from_compressed(&escrow.g).unwrap();
         // let v_norm = G2Affine::from_compressed(&escrow.v).unwrap();
         // let u = G1Affine::from_compressed(&escrow.u).unwrap();
         //
         // let mu_scalar = Scalar::from_bytes(&mu).unwrap();   //todo replace mu to be and than use reverse endianness
         // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
-
+        //
         // let all_h_i_multiply_vi = compute_h_i_multiply_vi(&escrow.queries);
         // let u_multiply_mu = u.mul(mu_scalar);
         //
@@ -220,8 +216,8 @@ mod escrow_project {
         // let right_pairing = pairing(&multiplication_sum_affine, &v_norm);
         //
         // let is_verified = left_pairing.eq(&right_pairing);
-        let is_verified = false;
 
+        let is_verified = false;
         if is_verified {
             escrow.subscription_duration += 1;
             if escrow.subscription_duration > 5 {
@@ -317,7 +313,7 @@ mod escrow_project {
             msg!("Buyer is requesting funds");
 
             require!(
-            escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * 86400).try_into().unwrap(),
+            escrow.is_subscription_ended_by_seller || now > (escrow.last_prove_date + 3 * DAY_IN_SECOND).try_into().unwrap(),
             ErrorCode::Unauthorized
         );
 
@@ -467,7 +463,7 @@ fn hex_str_to_scalar(hex_str: &str) -> Scalar {
     Scalar::from_bytes(&bytes_array).unwrap()
 }
 
-pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [u8; 48], mu: u128) -> G1Affine {
+pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [u8; 48], mu: [u8; 32]) -> G1Affine {
     let mut multiplication_sum = G1Projective::identity();
 
     for &(block_index, ref v_i_bytes) in queries {
@@ -478,8 +474,8 @@ pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [
 
     let u = G1Affine::from_compressed(&u_compressed).unwrap();
     // let u_mul_mu = u.mul(Scalar::from(mu as u64));
-    let mu_bytes = mu.to_le_bytes();
-    let mu_scalar = Scalar::from_bytes(&mu_bytes[..32].try_into().unwrap()).unwrap();
+    let mu_le = reverse_endianness(mu);
+    let mu_scalar = Scalar::from_bytes(&mu_le).unwrap();
     let u_mul_mu = u.mul(mu_scalar);
 
     G1Affine::from(multiplication_sum.add(u_mul_mu)) 
@@ -576,7 +572,6 @@ pub struct Escrow {
     pub v: [u8; 96],
     pub subscription_duration: u64,
     pub validate_every: i64,
-    // pub queries: Vec<(u64, u64)>,
     pub queries: Vec<(u128, [u8; 32])>,
     pub queries_generation_time: i64,
     pub balance: u64,
