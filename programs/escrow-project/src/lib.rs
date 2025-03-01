@@ -1,14 +1,38 @@
+// Solana SDK Imports
+use solana_program::{
+    program::invoke,
+    program::invoke_signed,
+    sysvar::{clock::Clock, slot_hashes},
+    system_instruction,
+    keccak,
+};
+
+// Anchor Imports
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
-use solana_program::program::invoke;
-use anchor_lang::solana_program::sysvar::clock::Clock;
-use anchor_lang::solana_program::keccak;
-use std::ops::{Add, Mul};
-use sha2::{Digest, Sha256};
-use bls12_381::{pairing, G1Affine, G2Affine, G1Projective, Scalar, G2Projective};
+use anchor_lang::solana_program::sysvar;
+
+// BLS Imports
+use bls12_381::{
+    pairing,
+    G1Affine,
+    G2Affine,
+    G1Projective,
+    Scalar,
+    G2Projective
+};
 use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve, HashToField};
-use solana_program::sysvar::slot_hashes;
+
+// Miscellaneous Imports
+use std::ops::{Add, Mul};
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// Cryptography Imports
+use sha2::{Digest, Sha256};
+
+// Number Imports
 use num_bigint::BigUint;
+
 
 declare_id!("5LthHd6oNK3QkTwC59pnn1tPFK7JJUgNjNnEptxxXSei");
 
@@ -162,73 +186,82 @@ mod escrow_project {
         Ok(())
     }
 
+    /// Proves the subscription and validates the sigma and mu values provided. This function ensures the validity
+    /// of a subscription, checking the timestamps and the cryptographic proofs, then updates the escrow account accordingly.
+    /// If the subscription is valid and meets the conditions, it will increase the subscription duration and transfer funds
+    /// to the seller after a successful proof.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account and the seller's account.
+    /// - `sigma`: A 48-byte array representing the proof.
+    /// - `mu`: A 32-byte array representing the challenge scalar.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the subscription is successfully proved, or an error if validation fails.
     pub fn prove_subscription(ctx: Context<ProveSubscription>, sigma: [u8; 48], mu: [u8; 32]) -> Result<()> {
+        msg!("Proving subscription...");
+
         let escrow = &mut ctx.accounts.escrow;
         let seller = &ctx.accounts.seller;
 
+        // Get the current timestamp from the system clock
         let clock = Clock::get()?;
         let now = clock.unix_timestamp;
 
         if now < escrow.last_prove_date + escrow.validate_every {
+            msg!("No validation needed yet. Skipping validation.");
             return Err(ErrorCode::NoValidationNeeded.into());
         }
         if now > escrow.queries_generation_time + 30 * MIN_IN_SECOND {
+            msg!("Query generation expired. Cannot prove subscription.");
             return Err(ErrorCode::GenerateAnotherQuery.into());
         }
 
-        // let multiplication_sum = calculate_multiplication(&escrow.queries, escrow.u, mu);
-        // let g_affine = G2Affine::from_compressed(&escrow.g).unwrap();
-        // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
-        // let v_affine = G2Affine::from_compressed(&escrow.v).unwrap();
-        // let multiplication_sum_affine = G1Affine::from(multiplication_sum);
-        //
-        // let left_pairing = pairing(&sigma_affine, &g_affine);
-        // let right_pairing = pairing(&multiplication_sum_affine, &v_affine);
-        //
-        // if left_pairing == right_pairing {
-        //     escrow.subscription_duration += 1;
-        //     if escrow.subscription_duration > 5 {
-        //         let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
-        //         **seller.to_account_info().try_borrow_mut_lamports()? += transfer_amount;
-        //         **escrow.to_account_info().try_borrow_mut_lamports()? -= transfer_amount;
-        //         escrow.balance -= transfer_amount;
-        //     }
-        //     escrow.last_prove_date = now;
-        //     Ok(())
-        // } else {
-        //     Err(ErrorCode::Unauthorized.into())
-        // }
-        //
-        // let g_norm = G2Affine::from_compressed(&escrow.g).unwrap();
-        // let v_norm = G2Affine::from_compressed(&escrow.v).unwrap();
-        // let u = G1Affine::from_compressed(&escrow.u).unwrap();
-        //
-        // let mu_scalar = Scalar::from_bytes(&mu).unwrap();   //todo replace mu to be and than use reverse endianness
-        // let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
-        //
-        // let all_h_i_multiply_vi = compute_h_i_multiply_vi(&escrow.queries);
-        // let u_multiply_mu = u.mul(mu_scalar);
-        //
-        // let multiplication_sum = all_h_i_multiply_vi.add(&u_multiply_mu);
-        // let multiplication_sum_affine = G1Affine::from(multiplication_sum);
-        //
-        // let left_pairing = pairing(&sigma_affine, &g_norm);
-        // let right_pairing = pairing(&multiplication_sum_affine, &v_norm);
-        //
-        // let is_verified = left_pairing.eq(&right_pairing);
+        // Deserialize compressed G2Affine and G1Affine points
+        let g_norm = G2Affine::from_compressed(&escrow.g).unwrap();
+        let v_norm = G2Affine::from_compressed(&escrow.v).unwrap();
+        let u = G1Affine::from_compressed(&escrow.u).unwrap();
+        msg!("Deserialized group elements: g_norm, v_norm, u.");
 
-        let is_verified = false;
+        // Reverse the endianness of the challenge (μ) and convert it to a scalar
+        let le_mu: [u8; 32] = reverse_endianness(mu);
+        let mu_scalar = Scalar::from_bytes(&le_mu).unwrap();
+        let sigma_affine = G1Affine::from_compressed(&sigma).unwrap();
+
+        // Compute the sum of all H_i * v_i and the term u * mu
+        let all_h_i_multiply_vi = compute_h_i_multiply_vi(&escrow.queries); // Π(H(i)^(v_i))
+        let u_multiply_mu = u.mul(mu_scalar);   // u^μ
+
+        let multiplication_sum = all_h_i_multiply_vi.add(&u_multiply_mu);   // Π(H(i)^(v_i)) * u^μ
+        let multiplication_sum_affine = G1Affine::from(multiplication_sum);
+
+        // Perform the pairings and check if the proof is valid
+        let left_pairing = pairing(&sigma_affine, &g_norm); // e(σ, g)
+        let right_pairing = pairing(&multiplication_sum_affine, &v_norm);   // e(Π(H(i)^(v_i)) * u^μ, v)
+
+        msg!("Pairing left: {:?}, Pairing right: {:?}", left_pairing, right_pairing);
+
+        let is_verified = left_pairing.eq(&right_pairing); // e(σ, g) == e(Π(H(i)^(v_i)) * u^μ, v)
+
+        // If the proof is valid, proceed with the subscription logic
         if is_verified {
+            msg!("Proof successfully verified.");
+
             escrow.subscription_duration += 1;
             if escrow.subscription_duration > 5 {
                 let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
+                msg!("Transferring {} lamports to the seller...", transfer_amount);
+
                 **seller.to_account_info().try_borrow_mut_lamports()? += transfer_amount;
                 **escrow.to_account_info().try_borrow_mut_lamports()? -= transfer_amount;
                 escrow.balance -= transfer_amount;
             }
             escrow.last_prove_date = now;
+
+            msg!("Subscription successfully proved, last prove date updated to: {}", now);
             Ok(())
         } else {
+            msg!("Proof verification failed. Unauthorized.");
             Err(ErrorCode::Unauthorized.into())
         }
     }
@@ -385,6 +418,15 @@ mod escrow_project {
     }
 }
 
+/// Converts a `u128` into a 32-byte array, placing it in the last 16 bytes of the array.
+/// The first 16 bytes are set to zero, and the `u128` value is represented in big-endian format.
+/// This function is useful for converting a `u128` value into a fixed-size array for cryptographic operations, such as hashing.
+///
+/// # Parameters
+/// - `i`: A `u128` value to be converted into a 32-byte array.
+///
+/// # Returns
+/// - `[u8; 32]`: A 32-byte array where the first 16 bytes are zero, and the last 16 bytes contain the `u128` value in big-endian format.
 fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
     let mut bytes = [0u8; 32];  // Create a 32-byte array, initially all zeros
 
@@ -394,6 +436,15 @@ fn convert_u128_to_32_bytes(i: u128) -> [u8; 32] {
     bytes
 }
 
+/// Performs a modulus operation on a 32-byte number with a predefined modulus (p).
+/// The input `num` is reduced modulo a fixed constant `p`, and the result is returned as a 32-byte array.
+/// This is typically used for cryptographic operations that require working with large integers.
+///
+/// # Parameters
+/// - `num`: A 32-byte array representing the number to be reduced modulo `p`.
+///
+/// # Returns
+/// - `[u8; 32]`: A 32-byte array representing the result of the modulus operation (`num % p`).
 fn num_modulus_p(num: [u8; 32]) -> [u8; 32] {
     let p_modulus_bytes: [u8; 32] = [
         0x73, 0xed, 0xa7, 0x53, // 0x73ed_a753
@@ -424,12 +475,34 @@ fn num_modulus_p(num: [u8; 32]) -> [u8; 32] {
     result_bytes
 }
 
+/// Reverses the endianness of a 32-byte array.
+/// This function takes a 32-byte array and reverses the order of its elements.
+/// It's typically used when dealing with systems that use different byte orders (endianness).
+///
+/// # Parameters
+/// - `input`: A 32-byte array that represents the data whose endianness is to be reversed.
+///
+/// # Returns
+/// - Returns a new 32-byte array with the bytes in reversed order.
 fn reverse_endianness(input: [u8; 32]) -> [u8; 32] {
     let mut reversed = input;
-    reversed.reverse();
+    reversed.reverse(); // Reverse the byte order in place
     reversed
 }
 
+/// Computes the sum of H(i)^(v_i) for a list of queries.
+/// This function iterates over each query and performs the following steps:
+/// 1. Computes H(i) using a hash-to-curve function.
+/// 2. Converts v_i (a 32-byte array) to a scalar using reverse endianness.
+/// 3. Computes H(i)^(v_i), where `^` denotes scalar multiplication.
+/// 4. Adds the result to the cumulative sum `all_h_i_multiply_vi`.
+///
+/// # Parameters
+/// - `queries`: A vector of tuples, where each tuple contains a u128 value `i` and a 32-byte array `v_i_bytes`.
+///   The vector represents a series of queries to process.
+///
+/// # Returns
+/// - `G1Projective`: The resulting projective point after adding up all H(i)^(v_i) for each query - [Π(H(i)^(v_i))].
 pub fn compute_h_i_multiply_vi(queries: &Vec<(u128, [u8; 32])>) -> G1Projective {
     let mut all_h_i_multiply_vi = G1Projective::identity();
 
@@ -444,6 +517,17 @@ pub fn compute_h_i_multiply_vi(queries: &Vec<(u128, [u8; 32])>) -> G1Projective 
     all_h_i_multiply_vi
 }
 
+/// Performs a hash-to-curve operation on a u128 value to generate a point on the BLS12-381 curve (G1).
+/// It uses the XMD-based SHA-256 expansion method for hashing and converts the result into a G1Affine point.
+///
+/// This method is typically used in cryptographic applications where mapping arbitrary values (like `u128`)
+/// to a point on the elliptic curve is required, such as in pairing-based cryptography or signatures.
+///
+/// # Parameters
+/// - `i`: A `u128` value to be hashed and mapped to a point on the curve.
+///
+/// # Returns
+/// - `G1Affine`: A point on the BLS12-381 G1 curve in affine coordinates, suitable for cryptographic operations.
 fn perform_hash_to_curve(i: u128) -> G1Affine {
     let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_";
 
@@ -455,30 +539,6 @@ fn perform_hash_to_curve(i: u128) -> G1Affine {
 
     // Convert from G1Projective to G1Affine
     G1Affine::from(&g)
-}
-
-fn hex_str_to_scalar(hex_str: &str) -> Scalar {
-    let bytes = hex::decode(hex_str).expect("Invalid hex string");
-    let bytes_array: [u8; 32] = bytes.try_into().expect("Hex string should be 32 bytes long");
-    Scalar::from_bytes(&bytes_array).unwrap()
-}
-
-pub fn calculate_multiplication(queries: &Vec<(u128, [u8; 32])>, u_compressed: [u8; 48], mu: [u8; 32]) -> G1Affine {
-    let mut multiplication_sum = G1Projective::identity();
-
-    for &(block_index, ref v_i_bytes) in queries {
-        let h_i = perform_hash_to_curve(block_index);
-        let v_i_scalar = Scalar::from_bytes(v_i_bytes).unwrap();
-        multiplication_sum = multiplication_sum.add(h_i.mul(v_i_scalar));
-    }
-
-    let u = G1Affine::from_compressed(&u_compressed).unwrap();
-    // let u_mul_mu = u.mul(Scalar::from(mu as u64));
-    let mu_le = reverse_endianness(mu);
-    let mu_scalar = Scalar::from_bytes(&mu_le).unwrap();
-    let u_mul_mu = u.mul(mu_scalar);
-
-    G1Affine::from(multiplication_sum.add(u_mul_mu)) 
 }
 
 #[derive(Accounts)]
