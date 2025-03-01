@@ -81,15 +81,20 @@ This instruction generates queries for a subscription by processing slot hashes 
 
 This instruction allows the seller to provide a elastic curve points as proofs (`sigma` and `mu`) to validate the storage subscription (PoR). It updates the escrow account based on the validity of the proof.
 
-### 5. End Subscription by Buyer
+### 5. Prove Subscription Simulation
+
+This instruction simulates proof verification for a subscription due to Solana’s compute unit limitations. The actual BLS pairing operation is too costly to execute on-chain, so the function uses a boolean flag (`is_verified`) to indicate off-chain verification.
+If `is_verified` is `true`, the function updates the escrow account by extending the subscription duration and transferring funds to the seller if conditions are met.
+
+### 6. End Subscription by Buyer
 
 This instruction allows the buyer to end the storage subscription by interacting with the escrow account. It ensures that only the buyer can terminate the subscription.
 
-### 6. End Subscription by Seller
+### 7. End Subscription by Seller
 
 This instruction allows the seller to end the storage subscription by interacting with the escrow account. It ensures that only the seller can terminate the subscription.
 
-### 7. Request Funds
+### 8. Request Funds
 
 This instruction handles the fund request process for both the buyer and the seller. The function ensures that the requesting user is either the buyer or the seller and checks that the conditions are met. If successful, the funds are transferred from the escrow account to the user.
 

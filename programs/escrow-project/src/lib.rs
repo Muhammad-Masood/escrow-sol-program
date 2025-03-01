@@ -191,6 +191,10 @@ mod escrow_project {
     /// If the subscription is valid and meets the conditions, it will increase the subscription duration and transfer funds
     /// to the seller after a successful proof.
     ///
+    /// **Note:** This instruction will likely fail due to compute unit (CU) limitations on Solana. The BLS pairing operation
+    /// required for proof verification is too costly to execute within the available compute units, even when the maximum CU limit
+    /// is set. As a result, this function is intended for simulation purposes and will not work as expected on-chain.
+    ///
     /// # Parameters
     /// - `ctx`: The context containing the escrow account and the seller's account.
     /// - `sigma`: A 48-byte array representing the proof.
@@ -242,6 +246,63 @@ mod escrow_project {
         msg!("Pairing left: {:?}, Pairing right: {:?}", left_pairing, right_pairing);
 
         let is_verified = left_pairing.eq(&right_pairing); // e(σ, g) == e(Π(H(i)^(v_i)) * u^μ, v)
+
+        // If the proof is valid, proceed with the subscription logic
+        if is_verified {
+            msg!("Proof successfully verified.");
+
+            escrow.subscription_duration += 1;
+            if escrow.subscription_duration > 5 {
+                let transfer_amount = (1.0 + 0.05 * escrow.query_size as f64) as u64;
+                msg!("Transferring {} lamports to the seller...", transfer_amount);
+
+                **seller.to_account_info().try_borrow_mut_lamports()? += transfer_amount;
+                **escrow.to_account_info().try_borrow_mut_lamports()? -= transfer_amount;
+                escrow.balance -= transfer_amount;
+            }
+            escrow.last_prove_date = now;
+
+            msg!("Subscription successfully proved, last prove date updated to: {}", now);
+            Ok(())
+        } else {
+            msg!("Proof verification failed. Unauthorized.");
+            Err(ErrorCode::Unauthorized.into())
+        }
+    }
+
+    /// Simulates the proof verification for a subscription due to Solana's compute unit limitations.
+    /// This function does not perform the actual BLS pairing operation, as even with the maximum allowed
+    /// compute units, the verification is too costly. Instead, it accepts a boolean flag (`is_verified`)
+    /// representing whether the proof was successfully verified off-chain.
+    ///
+    /// If `is_verified` is `true`, the function updates the escrow account by extending the subscription
+    /// duration and transferring funds to the seller once the subscription meets the required conditions.
+    ///
+    /// # Parameters
+    /// - `ctx`: The context containing the escrow account and the seller's account.
+    /// - `is_verified`: A boolean value indicating whether the proof was verified off-chain.
+    ///
+    /// # Returns
+    /// - `Result<()>`: Returns `Ok(())` if the subscription is successfully updated, or an error if
+    ///   validation is not needed or the proof verification failed.
+    pub fn prove_subscription_simulation(ctx: Context<ProveSubscriptionSimulation>, is_verified: bool) -> Result<()> {
+        msg!("Proving subscription...");
+
+        let escrow = &mut ctx.accounts.escrow;
+        let seller = &ctx.accounts.seller;
+
+        // Get the current timestamp from the system clock
+        let clock = Clock::get()?;
+        let now = clock.unix_timestamp;
+
+        if now < escrow.last_prove_date + escrow.validate_every {
+            msg!("No validation needed yet. Skipping validation.");
+            return Err(ErrorCode::NoValidationNeeded.into());
+        }
+        if now > escrow.queries_generation_time + 30 * MIN_IN_SECOND {
+            msg!("Query generation expired. Cannot prove subscription.");
+            return Err(ErrorCode::GenerateAnotherQuery.into());
+        }
 
         // If the proof is valid, proceed with the subscription logic
         if is_verified {
@@ -605,6 +666,14 @@ pub struct GetQueryValues<'info> {
 
 #[derive(Accounts)]
 pub struct ProveSubscription<'info> {
+    #[account(mut)]
+    pub escrow: Account<'info, Escrow>,
+    #[account(mut)]
+    pub seller: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ProveSubscriptionSimulation<'info> {
     #[account(mut)]
     pub escrow: Account<'info, Escrow>,
     #[account(mut)]
